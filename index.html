@@ -6,6 +6,8 @@
 <title>200lvl Football League</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=JetBrains+Mono:wght@400;500;700&family=Work+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <style>
   :root{
     --bg:#0a1712;
@@ -227,6 +229,8 @@
   <span style="width:1px; height:16px; background:var(--line);"></span>
   <span>💰 League balance:</span>
   <span id="liveBalance" class="mono" style="color:var(--amber); font-weight:700;">—</span>
+  <span style="width:1px; height:16px; background:var(--line);"></span>
+  <span id="syncStatus" style="font-size:11px;">🔄 Connecting…</span>
 </div>
 
 <header class="hero">
@@ -321,8 +325,18 @@
 
 <script>
 /* ================= STATE ================= */
-const STORAGE_KEY = 'lvl200LeagueData_v1';
+const STORAGE_KEY = 'lvl200LeagueData_v1'; // used only as an offline fallback cache
 let isAdmin = sessionStorage.getItem('lvl200IsAdmin') === '1';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCKX7hRb8-QfqIGesmGWr5WXpewlhSEVGg",
+  authDomain: "lvl-league-45fc0.firebaseapp.com",
+  databaseURL: "https://lvl-league-45fc0-default-rtdb.firebaseio.com",
+  projectId: "lvl-league-45fc0",
+  storageBucket: "lvl-league-45fc0.firebasestorage.app",
+  messagingSenderId: "588595383791",
+  appId: "1:588595383791:web:26f198e031820ee85ffa1a"
+};
 
 function defaultState(){
   const teams = [];
@@ -338,18 +352,74 @@ function defaultState(){
     manualGoals:[], manualAssists:[]
   };
 }
-function loadState(){
-  try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw) return defaultState();
-    const parsed = JSON.parse(raw);
-    // merge in case of missing fields from older versions
-    const d = defaultState();
-    return Object.assign(d, parsed, {settings: Object.assign(d.settings, parsed.settings||{})});
-  }catch(e){ return defaultState(); }
+function mergeWithDefaults(parsed){
+  const d = defaultState();
+  if(!parsed) return d;
+  return Object.assign(d, parsed, {settings: Object.assign(d.settings, parsed.settings||{})});
 }
-let state = loadState();
-function saveState(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+
+let state = mergeWithDefaults(JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'));
+let db = null;
+let dbRef = null;
+let firebaseReady = false;
+let applyingRemoteUpdate = false; // guard to stop echoing our own writes straight back
+let saveTimer = null;
+
+function setSyncStatus(text, color){
+  const el = document.getElementById('syncStatus');
+  if(el){ el.textContent = text; el.style.color = color || 'var(--ink-dim)'; }
+}
+
+function initFirebase(){
+  try{
+    const app = firebase.initializeApp(firebaseConfig);
+    db = firebase.database();
+    dbRef = db.ref('leagueData');
+    setSyncStatus('🔄 Connecting…', 'var(--ink-dim)');
+
+    dbRef.on('value', (snapshot)=>{
+      const remote = snapshot.val();
+      if(remote){
+        applyingRemoteUpdate = true;
+        state = mergeWithDefaults(remote);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        renderAll();
+        applyingRemoteUpdate = false;
+      } else {
+        // nothing in the database yet — push our current (default) state up as the seed
+        dbRef.set(state);
+      }
+      firebaseReady = true;
+      setSyncStatus('🟢 Synced live', 'var(--turf)');
+    }, (err)=>{
+      console.error('Firebase read error', err);
+      setSyncStatus('⚠️ Offline (saved on this device only)', '#ff8a80');
+    });
+
+    db.ref('.info/connected').on('value', (snap)=>{
+      if(firebaseReady){
+        setSyncStatus(snap.val()===true ? '🟢 Synced live' : '⚠️ Offline (saved on this device only)', snap.val()===true?'var(--turf)':'#ff8a80');
+      }
+    });
+  }catch(e){
+    console.error('Firebase init failed', e);
+    setSyncStatus('⚠️ Offline (saved on this device only)', '#ff8a80');
+  }
+}
+
+function saveState(){
+  // always keep an instant local cache so the UI never waits on the network
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if(applyingRemoteUpdate) return; // don't write back data we just received
+  if(!dbRef){ return; }
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(()=>{
+    dbRef.set(state).catch(err=>{
+      console.error('Firebase write error', err);
+      setSyncStatus('⚠️ Could not sync last change', '#ff8a80');
+    });
+  }, 150); // tiny debounce so rapid edits don't spam the database
+}
 
 function esc(str){
   return String(str==null?'':str).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
@@ -1070,7 +1140,8 @@ function resetEverything(){
 }
 
 /* ================= INIT ================= */
-renderAll();
+renderAll(); // paint instantly from local cache so it never looks blank
+initFirebase(); // then connect and start live-syncing with every other device
 </script>
 </body>
 </html>
